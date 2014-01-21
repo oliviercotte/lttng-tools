@@ -36,6 +36,9 @@ REQUIREMENTS:
 
       * Debian/Ubuntu package: uuid-dev
 
+    - libxml2 >= 2.7.6
+      XML document parsing library.
+
     - Perl (optional)
       Needed for make check and tests.
 
