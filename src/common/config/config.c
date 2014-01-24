@@ -22,11 +22,19 @@
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
+#include <dirent.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/stat.h>
 
 #include <common/defaults.h>
 #include <common/error.h>
 #include <common/macros.h>
 #include <common/utils.h>
+#include <lttng/lttng-error.h>
+#include <libxml/parser.h>
+#include <libxml/valid.h>
+#include <libxml/xmlschemas.h>
 
 #include "config.h"
 #include "config-internal.h"
@@ -35,6 +43,12 @@ struct handler_filter_args {
 	const char* section;
 	config_entry_handler_cb handler;
 	void *user_data;
+};
+
+struct session_config_validation_ctx {
+	xmlSchemaParserCtxtPtr parser_ctx;
+	xmlSchemaPtr schema;
+	xmlSchemaValidCtxtPtr schema_validation_ctx;
 };
 
 const char * const config_str_yes = "yes";
@@ -416,4 +430,241 @@ end:
 	xmlFree(encoded_element_name);
 	xmlFree(encoded_value);
 	return ret > 0 ? 0 : ret;
+}
+
+static
+void xml_error_handler(void *ctx, const char *format, ...)
+{
+	char *errMsg;
+	va_list args;
+	int ret;
+
+	va_start(args, format);
+	ret = vasprintf(&errMsg, format, args);
+	if (ret) {
+		ERR("String allocation failed in xml error handler");
+		return;
+	}
+	va_end(args);
+
+	fprintf(stderr, "XML Error: %s", errMsg);
+	free(errMsg);
+}
+
+static
+void fini_session_config_validation_ctx(
+	struct session_config_validation_ctx *ctx)
+{
+	if (ctx->parser_ctx) {
+		xmlSchemaFreeParserCtxt(ctx->parser_ctx);
+	}
+
+	if (ctx->schema) {
+		xmlSchemaFree(ctx->schema);
+	}
+
+	if (ctx->schema_validation_ctx) {
+		xmlSchemaFreeValidCtxt(ctx->schema_validation_ctx);
+	}
+
+	memset(ctx, 0, sizeof(struct session_config_validation_ctx));
+}
+
+static
+int init_session_config_validation_ctx(
+	struct session_config_validation_ctx *ctx)
+{
+	int ret = 0;
+
+	ctx->parser_ctx = xmlSchemaNewParserCtxt(
+		DEFAULT_SESSION_CONFIG_XSD_PATH);
+	if (!ctx->parser_ctx) {
+		ERR("XSD parser context creation failed");
+		ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
+		goto end;
+	}
+	xmlSchemaSetParserErrors(ctx->parser_ctx, xml_error_handler,
+		xml_error_handler, NULL);
+
+	ctx->schema = xmlSchemaParse(ctx->parser_ctx);
+	if (!ctx->schema) {
+		ERR("XSD parsing failed");
+		ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
+		goto end;
+	}
+
+	ctx->schema_validation_ctx = xmlSchemaNewValidCtxt(ctx->schema);
+	if (!ctx->schema_validation_ctx) {
+		ERR("XSD validation context creation failed");
+		ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
+		goto end;
+	}
+	xmlSchemaSetValidErrors(ctx->schema_validation_ctx, xml_error_handler,
+		xml_error_handler, NULL);
+end:
+	if (ret) {
+		fini_session_config_validation_ctx(ctx);
+	}
+
+	return ret;
+}
+
+static
+int load_session_from_file(const char *path, const char *session_name,
+	struct session_config_validation_ctx *validation_ctx)
+{
+	int ret;
+
+	ret = xmlSchemaValidateFile(validation_ctx->schema_validation_ctx,
+		path, 0);
+	if (ret) {
+		ERR("Session configuration file validation failed");
+		ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
+		goto end;
+	}
+end:
+	return ret;
+}
+
+static
+int load_session_from_path(const char *path, const char *session_name,
+	struct session_config_validation_ctx *validation_ctx)
+{
+	int ret = 0;
+	struct stat sb;
+	int session_found = !session_name;
+
+	ret = stat(path, &sb);
+	if (ret) {
+		PERROR("stat");
+		ret = -LTTNG_ERR_INVALID;
+		goto end;
+	}
+
+	if (S_ISDIR(sb.st_mode)) {
+		DIR *directory;
+		struct dirent *entry;
+		struct dirent *result;
+		char *file_path = NULL;
+		size_t path_len = strlen(path);
+
+		if (path_len >= PATH_MAX) {
+			ret = -LTTNG_ERR_INVALID;
+			goto end;
+		}
+
+		entry = malloc(sizeof(struct dirent));
+		if (!entry) {
+			ret = -LTTNG_ERR_NOMEM;
+			goto end;
+		}
+
+		directory = opendir(path);
+		if (!directory) {
+			ret = -LTTNG_ERR_LOAD_IO_FAIL;
+			free(entry);
+			goto end;
+		}
+
+		file_path = zmalloc(PATH_MAX);
+		if (!file_path) {
+			ret = -LTTNG_ERR_NOMEM;
+			free(entry);
+			goto end;
+		}
+
+		strcpy(file_path, path);
+		if (file_path[path_len - 1] != '/') {
+			file_path[path_len++] = '/';
+		}
+
+		/* Search for *.lttng files */
+		while (readdir_r(directory, entry, &result) && result) {
+			size_t file_name_len = strlen(result->d_name);
+
+			if (file_name_len <=
+				sizeof(DEFAULT_SESSION_CONFIG_FILE_EXTENSION)) {
+				continue;
+			}
+
+			if (path_len + file_name_len > PATH_MAX) {
+				continue;
+			}
+
+			if (strcmp(DEFAULT_SESSION_CONFIG_FILE_EXTENSION,
+				result->d_name - sizeof(
+				DEFAULT_SESSION_CONFIG_FILE_EXTENSION))) {
+				continue;
+			}
+
+			strcpy(file_path + path_len, result->d_name);
+			file_path[path_len + file_name_len] = '\0';
+
+			ret = load_session_from_file(path, session_name,
+				validation_ctx);
+			if (session_name && !ret) {
+				session_found = 1;
+				break;
+			}
+		}
+
+		free(entry);
+		free(file_path);
+	} else {
+		ret = load_session_from_file(path, session_name,
+			validation_ctx);
+		if (ret) {
+			goto end;
+		} else {
+			session_found = 1;
+		}
+	}
+
+end:
+	if (!session_found) {
+		ret = -LTTNG_ERR_LOAD_SESSION_NOT_FOUND;
+	}
+
+	return ret;
+}
+
+LTTNG_HIDDEN
+int config_load_session(const char *path,
+		const char *session_name)
+{
+	int ret = 0;
+	struct session_config_validation_ctx validation_ctx = {0};
+
+	ret = init_session_config_validation_ctx(&validation_ctx);
+	if (ret) {
+		goto end;
+	}
+
+	if (!path) {
+		/* Try home path */
+
+		/* Try system session configuration path */
+	} else {
+		ret = access(path, F_OK);
+		if (ret) {
+			PERROR("access");
+			switch (errno) {
+			case ENOENT:
+				ret = -LTTNG_ERR_INVALID;
+				break;
+			case EACCES:
+				ret = -LTTNG_ERR_EPERM;
+				break;
+			default:
+				ret = -LTTNG_ERR_UNK;
+				break;
+			}
+			goto end;
+		}
+
+		ret = load_session_from_path(path, session_name,
+			&validation_ctx);
+	}
+end:
+	return ret;
 }
