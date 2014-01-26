@@ -36,6 +36,7 @@
 #include <libxml/parser.h>
 #include <libxml/valid.h>
 #include <libxml/xmlschemas.h>
+#include <libxml/tree.h>
 
 #include "config.h"
 #include "config-internal.h"
@@ -530,7 +531,7 @@ void xml_error_handler(void *ctx, const char *format, ...)
 
 	va_start(args, format);
 	ret = vasprintf(&errMsg, format, args);
-	if (ret) {
+	if (ret == -1) {
 		ERR("String allocation failed in xml error handler");
 		return;
 	}
@@ -599,25 +600,169 @@ end:
 }
 
 static
-int load_session_from_file(const char *path, const char *session_name,
-	struct session_config_validation_ctx *validation_ctx)
+int parse_uint(xmlChar *str, uint64_t *val)
 {
-	int ret;
+	int ret = 0;
+	char *endptr;
 
-	ret = xmlSchemaValidateFile(validation_ctx->schema_validation_ctx,
-		path, 0);
-	if (ret) {
-		ERR("Session configuration file validation failed");
-		ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
+	if (!str || !val) {
+		ret = -1;
 		goto end;
+	}
+
+	*val = strtoull((const char *)str, &endptr, 10);
+	if (!endptr || *endptr) {
+		ret = -1;
 	}
 end:
 	return ret;
 }
 
 static
+int parse_int(xmlChar *str, int64_t *val)
+{
+	int ret = 0;
+	char *endptr;
+
+	if (!str || !val) {
+		ret = -1;
+		goto end;
+	}
+
+	*val = strtoll((const char *)str, &endptr, 10);
+	if (!endptr || *endptr) {
+		ret = -1;
+	}
+end:
+	return ret;
+}
+
+static
+int parse_bool(xmlChar *str, int *val)
+{
+	int ret = 0;
+
+	if (!str || !val) {
+		ret = -1;
+		goto end;
+	}
+
+	if (!strcmp((const char *)str, config_xml_true)) {
+		*val = 1;
+	} else if (!strcmp((const char *)str, config_xml_false)) {
+		*val = 0;
+	} else {
+		WARN("Invalid boolean value encoutered (%s).",
+			(const char *)str);
+		ret = -1;
+	}
+end:
+	return ret;
+}
+
+static
+int process_session_node(xmlNodePtr session_node, const char *session_name,
+	int override)
+{
+	int ret;
+	int started = -1;
+	int snapshot_mode = -1;
+	uint64_t live_timer_interval = -1;
+	const char *name = NULL;
+	xmlNodePtr domain_node = NULL;
+	xmlNodePtr output_node = NULL;
+	xmlNodePtr node;
+
+	for (node = session_node->children; node; node = node->next) {
+		if (!name && !strcmp((const char *)node->name,
+			config_element_name)) {
+			/* name */
+			name = (const char *)node->content;
+		} else if (!domain_node && !strcmp((const char *)node->name,
+			config_element_domains)) {
+			/* domains */
+			domain_node = node->children;
+		} else if (started == -1 && !strcmp((const char *)node->name,
+			config_element_started)) {
+			/* started */
+			if (parse_bool(node->content, &started)) {
+				ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
+				goto end;
+			}
+		} else if (!output_node && !strcmp((const char *)node->name,
+			config_element_output)) {
+			/* output */
+			output_node = node->children;
+		} else {
+			/* attributes, snapshot_mode or live_timer_interval */
+			if (!strcmp((const char *)node->children->name,
+				config_element_snapshot_mode)) {
+				/* snapshot_mode */
+				if (parse_bool(node->children->content,
+					&snapshot_mode)) {
+					ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
+					goto end;
+				}
+			} else {
+				/* live_timer_interval */
+				if (parse_uint(node->children->content,
+					&live_timer_interval)) {
+					ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
+					goto end;
+				}
+			}
+		}
+	}
+end:
+	return ret;
+}
+
+static
+int load_session_from_file(const char *path, const char *session_name,
+	struct session_config_validation_ctx *validation_ctx, int override)
+{
+	int ret;
+	int session_found = !session_name;
+	xmlDocPtr doc;
+	xmlNodePtr sessions_node;
+	xmlNodePtr session_node;
+
+	doc = xmlParseFile(path);
+	if (!doc) {
+		ret = -LTTNG_ERR_LOAD_IO_FAIL;
+		goto end;
+	}
+
+	ret = xmlSchemaValidateDoc(validation_ctx->schema_validation_ctx,
+		doc);
+	if (ret) {
+		ERR("Session configuration file validation failed");
+		ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
+		goto end;
+	}
+
+	sessions_node = xmlDocGetRootElement(doc);
+	if (!sessions_node) {
+		goto end;
+	}
+
+	for (session_node = sessions_node->children;
+		session_node; session_node = session_node->next) {
+		ret = process_session_node(session_node, session_name, override);
+		session_node = session_node->next;
+	}
+
+end:
+	xmlFreeDoc(doc);
+	if (!ret) {
+		ret = session_found ? 0 : -LTTNG_ERR_LOAD_SESSION_NOT_FOUND;
+	}
+	return ret;
+}
+
+static
 int load_session_from_path(const char *path, const char *session_name,
-	struct session_config_validation_ctx *validation_ctx)
+	struct session_config_validation_ctx *validation_ctx, int override)
 {
 	int ret = 0;
 	struct stat sb;
@@ -668,7 +813,7 @@ int load_session_from_path(const char *path, const char *session_name,
 		}
 
 		/* Search for *.lttng files */
-		while (readdir_r(directory, entry, &result) && result) {
+		while (!readdir_r(directory, entry, &result) && result) {
 			size_t file_name_len = strlen(result->d_name);
 
 			if (file_name_len <=
@@ -681,27 +826,30 @@ int load_session_from_path(const char *path, const char *session_name,
 			}
 
 			if (strcmp(DEFAULT_SESSION_CONFIG_FILE_EXTENSION,
-				result->d_name - sizeof(
-				DEFAULT_SESSION_CONFIG_FILE_EXTENSION))) {
+				result->d_name + file_name_len - sizeof(
+				DEFAULT_SESSION_CONFIG_FILE_EXTENSION) + 1)) {
 				continue;
 			}
 
 			strcpy(file_path + path_len, result->d_name);
 			file_path[path_len + file_name_len] = '\0';
 
-			ret = load_session_from_file(path, session_name,
-				validation_ctx);
+			ret = load_session_from_file(file_path, session_name,
+				validation_ctx, override);
 			if (session_name && !ret) {
 				session_found = 1;
 				break;
 			}
 		}
 
+		if (closedir(directory)) {
+			PERROR("closedir");
+		}
 		free(entry);
 		free(file_path);
 	} else {
 		ret = load_session_from_file(path, session_name,
-			validation_ctx);
+			validation_ctx, override);
 		if (ret) {
 			goto end;
 		} else {
@@ -719,7 +867,7 @@ end:
 
 LTTNG_HIDDEN
 int config_load_session(const char *path,
-		const char *session_name)
+	const char *session_name, int override)
 {
 	int ret = 0;
 	struct session_config_validation_ctx validation_ctx = {0};
@@ -752,7 +900,7 @@ int config_load_session(const char *path,
 		}
 
 		ret = load_session_from_path(path, session_name,
-			&validation_ctx);
+			&validation_ctx, override);
 	}
 end:
 	return ret;

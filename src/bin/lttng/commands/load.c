@@ -98,7 +98,7 @@ int cmd_load(int argc, const char **argv)
 	}
 
 	opt_load_all = !opt_session_name;
-	ret = config_load_session(opt_input_path, opt_session_name);
+	ret = config_load_session(opt_input_path, opt_session_name, opt_force);
 	if (ret) {
 		ret = CMD_ERROR;
 	}

@@ -197,11 +197,13 @@ int config_writer_write_element_string(struct config_writer *writer,
  * session_name Name of the session to load. Will load all
  * sessions from path if NULL.
  *
+ * override Override current session configuration if it exists.
+ *
  * Returns zero if the session could be loaded successfully. Returns
  * a negative LTTNG_ERR code on error.
  */
 LTTNG_HIDDEN
-int config_load_session(const char *path,
-		const char *session_name);
+int config_load_session(const char *path, const char *session_name,
+		int override);
 
 #endif /* _CONFIG_H */
