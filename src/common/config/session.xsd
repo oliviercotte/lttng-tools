@@ -191,11 +191,11 @@ elementFormDefault="qualified" version="2.5">
 
 <!-- Maps to struct lttng_domain and contains channels -->
 <xs:complexType name="domain_type">
-	<xs:sequence>
+	<xs:all>
 		<xs:element name="type" type="domain_type_type"/>
 		<xs:element name="buffer_type" type="domain_buffer_type"/>
 		<xs:element name="channels" type="channel_list_type" minOccurs="0"/>
-	</xs:sequence>
+	</xs:all>
 </xs:complexType>
 
 <xs:complexType name="session_attributes_type">
