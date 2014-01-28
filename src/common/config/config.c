@@ -805,6 +805,7 @@ int process_consumer_output(xmlNodePtr consumer_output_node,
 
 			/* enabled */
 			ret = parse_bool(enabled_str, &output->enabled);
+			free(enabled_str);
 			if (ret) {
 				goto end;
 			}
@@ -890,7 +891,8 @@ int process_session_node(xmlNodePtr session_node, const char *session_name,
 			output_node = node;
 		} else {
 			/* attributes, snapshot_mode or live_timer_interval */
-			xmlNodePtr attributes_child = xmlFirstElementChild(node);
+			xmlNodePtr attributes_child =
+				xmlFirstElementChild(node);
 
 			if (!strcmp((const char *) attributes_child->name,
 				config_element_snapshot_mode)) {
@@ -1005,7 +1007,7 @@ domain_init_error:
 		}
 
 		if (output.path) {
-			/* Local e */
+			/* Local session */
 			ret = lttng_create_session(name, NULL);
 		} else if (output.control_uri || output.data_uri) {
 			/* Net destination */
@@ -1065,15 +1067,16 @@ int load_session_from_file(const char *path, const char *session_name,
 	}
 
 	for (session_node = xmlFirstElementChild(sessions_node);
-		session_node; session_node = xmlNextElementSibling(session_node)) {
-		ret = process_session_node(session_node, session_name, override);
+		session_node; session_node =
+			xmlNextElementSibling(session_node)) {
+		ret = process_session_node(session_node,
+			session_name, override);
 		if (session_name && ret == 0) {
 			/* Target session found and loaded */
 			session_found = 1;
 			break;
 		}
 	}
-
 end:
 	xmlFreeDoc(doc);
 	if (!ret) {
@@ -1225,5 +1228,6 @@ int config_load_session(const char *path,
 			&validation_ctx, override);
 	}
 end:
+	fini_session_config_validation_ctx(&validation_ctx);
 	return ret;
 }
