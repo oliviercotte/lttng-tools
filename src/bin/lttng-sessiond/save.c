@@ -1335,6 +1335,13 @@ int save_session_output(struct config_writer *writer,
 {
 	int ret;
 
+	if ((session->snapshot_mode && session->snapshot.nb_output == 0) ||
+		(!session->snapshot_mode && !session->consumer)) {
+		/* Session is in no output mode */
+		ret = 0;
+		goto end;
+	}
+
 	ret = config_writer_open_element(writer, config_element_output);
 	if (ret) {
 		ret = LTTNG_ERR_SAVE_IO_FAIL;
@@ -1347,14 +1354,11 @@ int save_session_output(struct config_writer *writer,
 			goto end;
 		}
 	} else {
-		if (!session->consumer) {
-			ret = LTTNG_ERR_INVALID;
-			goto end;
-		}
-
-		ret = save_consumer_output(writer, session->consumer);
-		if (ret) {
-			goto end;
+		if (session->consumer) {
+			ret = save_consumer_output(writer, session->consumer);
+			if (ret) {
+				goto end;
+			}
 		}
 	}
 
@@ -1484,34 +1488,37 @@ int save_session(struct ltt_session *session,
 		goto end;
 	}
 
-	ret = config_writer_open_element(writer, config_element_attributes);
-	if (ret) {
-		ret = LTTNG_ERR_SAVE_IO_FAIL;
-		goto end;
-	}
-
-	if (session->snapshot_mode) {
-		ret = config_writer_write_element_bool(writer,
-			config_element_snapshot_mode, 1);
+	if (session->snapshot_mode || session->live_timer) {
+		ret = config_writer_open_element(writer,
+			config_element_attributes);
 		if (ret) {
 			ret = LTTNG_ERR_SAVE_IO_FAIL;
 			goto end;
 		}
-	} else {
-		ret = config_writer_write_element_signed_int(writer,
-			config_element_live_timer_interval,
-			session->live_timer);
+
+		if (session->snapshot_mode) {
+			ret = config_writer_write_element_bool(writer,
+				config_element_snapshot_mode, 1);
+			if (ret) {
+				ret = LTTNG_ERR_SAVE_IO_FAIL;
+				goto end;
+			}
+		} else {
+			ret = config_writer_write_element_signed_int(writer,
+				config_element_live_timer_interval,
+				session->live_timer);
+			if (ret) {
+				ret = LTTNG_ERR_SAVE_IO_FAIL;
+				goto end;
+			}
+		}
+
+		/* /attributes */
+		ret = config_writer_close_element(writer);
 		if (ret) {
 			ret = LTTNG_ERR_SAVE_IO_FAIL;
 			goto end;
 		}
-	}
-
-	/* /attributes */
-	ret = config_writer_close_element(writer);
-	if (ret) {
-		ret = LTTNG_ERR_SAVE_IO_FAIL;
-		goto end;
 	}
 
 	ret = save_session_output(writer, session);
