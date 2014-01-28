@@ -38,6 +38,7 @@
 #include <libxml/xmlschemas.h>
 #include <libxml/tree.h>
 #include <lttng/lttng.h>
+#include <lttng/snapshot.h>
 
 #include "config.h"
 #include "config-internal.h"
@@ -677,11 +678,11 @@ int get_domain_type(xmlChar *domain)
 		goto end;
 	}
 
-	if (!strcmp((char *)domain, config_domain_type_kernel)) {
+	if (!strcmp((char *) domain, config_domain_type_kernel)) {
 		ret = LTTNG_DOMAIN_KERNEL;
-	} else if (!strcmp((char *)domain, config_domain_type_ust)) {
+	} else if (!strcmp((char *) domain, config_domain_type_ust)) {
 		ret = LTTNG_DOMAIN_UST;
-	} else if (!strcmp((char *)domain, config_domain_type_jul)) {
+	} else if (!strcmp((char *) domain, config_domain_type_jul)) {
 		ret = LTTNG_DOMAIN_JUL;
 	}
 end:
@@ -697,11 +698,11 @@ int get_buffer_type(xmlChar *buffer_type)
 		goto end;
 	}
 
-	if (!strcmp((char *)buffer_type, config_buffer_type_global)) {
+	if (!strcmp((char *) buffer_type, config_buffer_type_global)) {
 		ret = LTTNG_BUFFER_GLOBAL;
-	} else if (!strcmp((char *)buffer_type, config_buffer_type_per_uid)) {
+	} else if (!strcmp((char *) buffer_type, config_buffer_type_per_uid)) {
 		ret = LTTNG_BUFFER_PER_UID;
-	} else if (!strcmp((char *)buffer_type, config_buffer_type_per_pid)) {
+	} else if (!strcmp((char *) buffer_type, config_buffer_type_per_pid)) {
 		ret = LTTNG_BUFFER_PER_PID;
 	}
 end:
@@ -852,9 +853,114 @@ end:
 }
 
 static
-int create_snapshot_session(const char *name, xmlNodePtr output_node)
+int create_snapshot_session(const char *session_name, xmlNodePtr output_node)
 {
-	return -1;
+	int ret;
+	xmlNodePtr node = NULL;
+	xmlNodePtr snapshot_output_list_node;
+	xmlNodePtr snapshot_output_node;
+
+	if (!output_node) {
+		goto end;
+	}
+
+	ret = lttng_create_session_snapshot(session_name, NULL);
+	if (ret) {
+		goto end;
+	}
+
+	snapshot_output_list_node = xmlFirstElementChild(output_node);
+
+	/* Parse and create snapshot outputs */
+	for (snapshot_output_node = xmlFirstElementChild(
+		snapshot_output_list_node);
+		snapshot_output_node;
+		snapshot_output_node =
+			xmlNextElementSibling(snapshot_output_node)) {
+		char *name = NULL;
+		uint64_t max_size = UINT64_MAX;
+		struct consumer_output output = { 0 };
+		struct lttng_snapshot_output *snapshot_output;
+
+		for (node = xmlFirstElementChild(snapshot_output_node);
+			node; node = xmlNextElementSibling(node)) {
+			if (!strcmp((const char *) node->name,
+				config_element_name)) {
+				/* name */
+				name = (char *) xmlNodeGetContent(node);
+			} else if (!strcmp((const char *) node->name,
+				config_element_max_size)) {
+				xmlChar *content = xmlNodeGetContent(node);
+
+				/* max_size */
+				ret = parse_uint(content, &max_size);
+				free(content);
+				if (ret) {
+					ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
+					goto error_snapshot_output;
+				}
+			} else {
+				/* consumer_output */
+				ret = process_consumer_output(node, &output);
+				if (ret) {
+					goto error_snapshot_output;
+				}
+			}
+		}
+
+		snapshot_output = lttng_snapshot_output_create();
+		if (!snapshot_output) {
+			ret = -LTTNG_ERR_NOMEM;
+			goto error_snapshot_output;
+		}
+
+		ret = lttng_snapshot_output_set_name(name, snapshot_output);
+		if (ret) {
+			goto error_snapshot_output;
+		}
+
+		ret = lttng_snapshot_output_set_size(max_size, snapshot_output);
+		if (ret) {
+			goto error_snapshot_output;
+		}
+
+		if (output.path) {
+			ret = lttng_snapshot_output_set_ctrl_url(output.path,
+				snapshot_output);
+			if (ret) {
+				goto error_snapshot_output;
+			}
+		} else {
+			if (output.control_uri) {
+				ret = lttng_snapshot_output_set_ctrl_url(
+					output.control_uri, snapshot_output);
+				if (ret) {
+					goto error_snapshot_output;
+				}
+			}
+
+			if (output.data_uri) {
+				ret = lttng_snapshot_output_set_data_url(
+					output.data_uri, snapshot_output);
+				if (ret) {
+					goto error_snapshot_output;
+				}
+			}
+		}
+
+		ret = lttng_snapshot_add_output(session_name, snapshot_output);
+error_snapshot_output:
+		free(name);
+		free(output.path);
+		free(output.control_uri);
+		free(output.data_uri);
+		lttng_snapshot_output_destroy(snapshot_output);
+		if (ret) {
+			goto end;
+		}
+	}
+end:
+	return ret;
 }
 
 static
@@ -865,7 +971,7 @@ int create_session(const char *name,
 	xmlNodePtr output_node,
 	uint64_t live_timer_interval)
 {
-	struct consumer_output output = {0};
+	struct consumer_output output = { 0 };
 	xmlNodePtr consumer_output_node;
 	int ret;
 
@@ -978,7 +1084,7 @@ int process_session_node(xmlNodePtr session_node, const char *session_name,
 			xmlChar *node_content = xmlNodeGetContent(node);
 
 			/* name */
-			name = (char *)node_content;
+			name = (char *) node_content;
 		} else if (!domains_node && !strcmp((const char *) node->name,
 			config_element_domains)) {
 			/* domains */
@@ -1288,7 +1394,7 @@ int config_load_session(const char *path,
 	const char *session_name, int override)
 {
 	int ret = 0;
-	struct session_config_validation_ctx validation_ctx = {0};
+	struct session_config_validation_ctx validation_ctx = { 0 };
 
 	ret = init_session_config_validation_ctx(&validation_ctx);
 	if (ret) {
