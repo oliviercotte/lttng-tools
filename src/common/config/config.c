@@ -37,6 +37,7 @@
 #include <libxml/valid.h>
 #include <libxml/xmlschemas.h>
 #include <libxml/tree.h>
+#include <lttng/lttng.h>
 
 #include "config.h"
 #include "config-internal.h"
@@ -153,6 +154,13 @@ const char * const config_event_context_vppid = "VPPID";
 const char * const config_event_context_pthread_id = "PTHREAD_ID";
 const char * const config_event_context_hostname = "HOSTNAME";
 const char * const config_event_context_ip = "IP";
+
+struct consumer_output {
+	int enabled;
+	char *path;
+	char *control_uri;
+	char *data_uri;
+};
 
 static int config_entry_handler_filter(struct handler_filter_args *args,
 		const char *section, const char *name, const char *value)
@@ -610,7 +618,7 @@ int parse_uint(xmlChar *str, uint64_t *val)
 		goto end;
 	}
 
-	*val = strtoull((const char *)str, &endptr, 10);
+	*val = strtoull((const char *) str, &endptr, 10);
 	if (!endptr || *endptr) {
 		ret = -1;
 	}
@@ -629,7 +637,7 @@ int parse_int(xmlChar *str, int64_t *val)
 		goto end;
 	}
 
-	*val = strtoll((const char *)str, &endptr, 10);
+	*val = strtoll((const char *) str, &endptr, 10);
 	if (!endptr || *endptr) {
 		ret = -1;
 	}
@@ -647,16 +655,193 @@ int parse_bool(xmlChar *str, int *val)
 		goto end;
 	}
 
-	if (!strcmp((const char *)str, config_xml_true)) {
+	if (!strcmp((const char *) str, config_xml_true)) {
 		*val = 1;
-	} else if (!strcmp((const char *)str, config_xml_false)) {
+	} else if (!strcmp((const char *) str, config_xml_false)) {
 		*val = 0;
 	} else {
 		WARN("Invalid boolean value encoutered (%s).",
-			(const char *)str);
+			(const char *) str);
 		ret = -1;
 	}
 end:
+	return ret;
+}
+
+static
+int get_domain_type(xmlChar *domain)
+{
+	int ret = -1;
+
+	if (!domain) {
+		goto end;
+	}
+
+	if (!strcmp((char *)domain, config_domain_type_kernel)) {
+		ret = LTTNG_DOMAIN_KERNEL;
+	} else if (!strcmp((char *)domain, config_domain_type_ust)) {
+		ret = LTTNG_DOMAIN_UST;
+	} else if (!strcmp((char *)domain, config_domain_type_jul)) {
+		ret = LTTNG_DOMAIN_JUL;
+	}
+end:
+	return ret;
+}
+
+static
+int get_buffer_type(xmlChar *buffer_type)
+{
+	int ret = -1;
+
+	if (!buffer_type) {
+		goto end;
+	}
+
+	if (!strcmp((char *)buffer_type, config_buffer_type_global)) {
+		ret = LTTNG_BUFFER_GLOBAL;
+	} else if (!strcmp((char *)buffer_type, config_buffer_type_per_uid)) {
+		ret = LTTNG_BUFFER_PER_UID;
+	} else if (!strcmp((char *)buffer_type, config_buffer_type_per_pid)) {
+		ret = LTTNG_BUFFER_PER_PID;
+	}
+end:
+	return ret;
+}
+
+static
+int init_domain(xmlNodePtr domain_node, struct lttng_domain *domain)
+{
+	int ret;
+	xmlNodePtr node;
+
+	for (node = xmlFirstElementChild(domain_node); node;
+		node = xmlNextElementSibling(node)) {
+		if (!strcmp((const char *) node->name, config_element_type)) {
+			xmlChar *node_content = xmlNodeGetContent(node);
+
+			/* domain type */
+			ret = get_domain_type(node_content);
+			free(node_content);
+			if (ret == -1) {
+				ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
+				goto end;
+			}
+
+			domain->type = ret;
+		} else if (!strcmp((const char *) node->name,
+			config_element_buffer_type)) {
+			xmlChar *node_content = xmlNodeGetContent(node);
+
+			/* buffer type */
+			ret = get_buffer_type(node_content);
+			free(node_content);
+			if (ret == -1) {
+				ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
+				goto end;
+			}
+
+			domain->buf_type = ret;
+		}
+	}
+	ret = 0;
+end:
+	return ret;
+}
+
+static
+int create_snapshot_session(const char *name, xmlNodePtr output_node)
+{
+	return -1;
+}
+
+static
+int create_live_session(const char *name, xmlNodePtr output_node)
+{
+	return -1;
+}
+
+static
+int create_regular_session(const char *name, struct lttng_domain *domain,
+	xmlNodePtr output_node)
+{
+
+
+	return -1;
+}
+
+static
+int get_net_output_uris(xmlNodePtr net_output_node, char **control_uri,
+	char **data_uri)
+{
+	xmlNodePtr node;
+
+	for (node = xmlFirstElementChild(net_output_node); node;
+		node = xmlNextElementSibling(node)) {
+		if (!strcmp((const char *) node->name,
+			config_element_control_uri)) {
+			/* control_uri */
+			*control_uri = (char *) xmlNodeGetContent(node);
+		} else {
+			/* data_uri */
+			*data_uri = (char *) xmlNodeGetContent(node);
+		}
+	}
+
+	return control_uri || data_uri ? 0 : -LTTNG_ERR_LOAD_INVALID_CONFIG;
+}
+
+static
+int process_consumer_output(xmlNodePtr consumer_output_node,
+	struct consumer_output *output)
+{
+	int ret = 0;
+	xmlNodePtr node;
+
+	for (node = xmlFirstElementChild(consumer_output_node);
+		node; node = xmlNextElementSibling(node)) {
+		if (!strcmp((const char *) node->name,
+				config_element_enabled)) {
+			xmlChar *enabled_str = xmlNodeGetContent(node);
+
+			/* enabled */
+			ret = parse_bool(enabled_str, &output->enabled);
+			if (ret) {
+				goto end;
+			}
+		} else {
+			xmlNodePtr output_type_node;
+
+			/* destination */
+			output_type_node = xmlFirstElementChild(node);
+			if (!output_type_node) {
+				ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
+				goto end;
+			}
+
+			if (!strcmp((const char *) output_type_node->name,
+					config_element_path)) {
+				/* path */
+				output->path =
+					(char *) xmlNodeGetContent(
+						output_type_node);
+			} else {
+				/* net_output */
+				ret = get_net_output_uris(output_type_node,
+					&output->control_uri,
+					&output->data_uri);
+				if (ret) {
+					goto end;
+				}
+			}
+		}
+	}
+end:
+	if (ret) {
+		free(output->path);
+		free(output->control_uri);
+		free(output->data_uri);
+		memset(output, 0, sizeof(struct consumer_output));
+	}
 	return ret;
 }
 
@@ -667,53 +852,186 @@ int process_session_node(xmlNodePtr session_node, const char *session_name,
 	int ret;
 	int started = -1;
 	int snapshot_mode = -1;
-	uint64_t live_timer_interval = -1;
-	const char *name = NULL;
-	xmlNodePtr domain_node = NULL;
+	uint64_t live_timer_interval = UINT64_MAX;
+	char *name = NULL;
+	xmlNodePtr domains_node = NULL;
 	xmlNodePtr output_node = NULL;
 	xmlNodePtr node;
+	struct lttng_domain *kernel_domain = NULL;
+	struct lttng_domain *ust_domain = NULL;
+	struct lttng_domain *jul_domain = NULL;
 
-	for (node = session_node->children; node; node = node->next) {
-		if (!name && !strcmp((const char *)node->name,
+	for (node = xmlFirstElementChild(session_node); node;
+		node = xmlNextElementSibling(node)) {
+		if (!name && !strcmp((const char *) node->name,
 			config_element_name)) {
+			xmlChar *node_content = xmlNodeGetContent(node);
+
 			/* name */
-			name = (const char *)node->content;
-		} else if (!domain_node && !strcmp((const char *)node->name,
+			name = (char *)node_content;
+		} else if (!domains_node && !strcmp((const char *) node->name,
 			config_element_domains)) {
 			/* domains */
-			domain_node = node->children;
-		} else if (started == -1 && !strcmp((const char *)node->name,
+			domains_node = node;
+		} else if (started == -1 && !strcmp((const char *) node->name,
 			config_element_started)) {
+			xmlChar *node_content = xmlNodeGetContent(node);
+
 			/* started */
-			if (parse_bool(node->content, &started)) {
+			ret = parse_bool(node_content, &started);
+			free(node_content);
+			if (ret) {
 				ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
 				goto end;
 			}
-		} else if (!output_node && !strcmp((const char *)node->name,
+		} else if (!output_node && !strcmp((const char *) node->name,
 			config_element_output)) {
 			/* output */
-			output_node = node->children;
+			output_node = node;
 		} else {
 			/* attributes, snapshot_mode or live_timer_interval */
-			if (!strcmp((const char *)node->children->name,
+			xmlNodePtr attributes_child = xmlFirstElementChild(node);
+
+			if (!strcmp((const char *) attributes_child->name,
 				config_element_snapshot_mode)) {
+				xmlChar *snapshot_mode_content =
+					xmlNodeGetContent(attributes_child);
+
 				/* snapshot_mode */
-				if (parse_bool(node->children->content,
-					&snapshot_mode)) {
+				ret = parse_bool(snapshot_mode_content,
+					&snapshot_mode);
+				free(snapshot_mode_content);
+				if (ret) {
 					ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
 					goto end;
 				}
 			} else {
+				xmlChar *timer_interval_content =
+					xmlNodeGetContent(attributes_child);
+
 				/* live_timer_interval */
-				if (parse_uint(node->children->content,
-					&live_timer_interval)) {
+				ret = parse_uint(timer_interval_content,
+					&live_timer_interval);
+				free(timer_interval_content);
+				if (ret) {
 					ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
 					goto end;
 				}
 			}
 		}
 	}
+
+	if (!name) {
+		/* Mandatory attribute, as defined in the session XSD */
+		ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
+		goto end;
+	}
+
+	if (session_name && strcmp(name, session_name)) {
+		/* This is not the session we are looking for */
+		ret = -LTTNG_ERR_LOAD_SESSION_NOT_FOUND;
+		goto end;
+	}
+
+	/* Init domains to create the session handles */
+	for (node = xmlFirstElementChild(domains_node); node;
+		node = xmlNextElementSibling(node)) {
+		struct lttng_domain *domain =
+			zmalloc(sizeof(struct lttng_domain));
+
+		if (!domain) {
+			ret = -LTTNG_ERR_NOMEM;
+			goto end;
+		}
+
+		ret = init_domain(node, domain);
+		if (ret) {
+			goto domain_init_error;
+		}
+
+		switch (domain->type) {
+		case LTTNG_DOMAIN_KERNEL:
+			kernel_domain = domain;
+			break;
+		case LTTNG_DOMAIN_UST:
+			ust_domain = domain;
+			break;
+		case LTTNG_DOMAIN_JUL:
+			jul_domain = domain;
+			break;
+		default:
+			WARN("Invalid domain type");
+			goto domain_init_error;
+		}
+		continue;
+domain_init_error:
+		free(domain);
+		ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
+		goto end;
+	}
+
+	/* Create session type depending on output type */
+	if (snapshot_mode && snapshot_mode != -1) {
+		ret = create_snapshot_session(name, output_node);
+	} else if (live_timer_interval &&
+		live_timer_interval != UINT64_MAX) {
+		ret = create_live_session(name, output_node);
+	} else {
+		/* regular session */
+		struct consumer_output output = {0};
+		xmlNodePtr consumer_output_node;
+
+		if (output_node) {
+			consumer_output_node =
+				xmlFirstElementChild(output_node);
+			if (!consumer_output_node) {
+				ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
+				goto end;
+			}
+
+			if (strcmp((const char *) consumer_output_node->name,
+				   config_element_consumer_output)) {
+				WARN("Invalid output type, expected %s node",
+				     config_element_consumer_output);
+				ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
+				goto end;
+			}
+
+			ret = process_consumer_output(consumer_output_node,
+				&output);
+			if (ret) {
+				goto end;
+			}
+		}
+
+		if (output.path) {
+			/* Local e */
+			ret = lttng_create_session(name, NULL);
+		} else if (output.control_uri || output.data_uri) {
+			/* Net destination */
+		} else {
+			/* No output mode */
+		}
+
+
+		free(output.path);
+		free(output.control_uri);
+		free(output.data_uri);
+	}
+
+	if (ret) {
+		goto end;
+	}
+
+	for (node = xmlFirstElementChild(domains_node); node;
+		node = xmlNextElementSibling(node)) {
+		/* Create session domains */
+	}
 end:
+	free(kernel_domain);
+	free(ust_domain);
+	free(jul_domain);
+	free(name);
 	return ret;
 }
 
@@ -746,10 +1064,14 @@ int load_session_from_file(const char *path, const char *session_name,
 		goto end;
 	}
 
-	for (session_node = sessions_node->children;
-		session_node; session_node = session_node->next) {
+	for (session_node = xmlFirstElementChild(sessions_node);
+		session_node; session_node = xmlNextElementSibling(session_node)) {
 		ret = process_session_node(session_node, session_name, override);
-		session_node = session_node->next;
+		if (session_name && ret == 0) {
+			/* Target session found and loaded */
+			session_found = 1;
+			break;
+		}
 	}
 
 end:
