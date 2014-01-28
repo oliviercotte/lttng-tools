@@ -749,27 +749,6 @@ end:
 }
 
 static
-int create_snapshot_session(const char *name, xmlNodePtr output_node)
-{
-	return -1;
-}
-
-static
-int create_live_session(const char *name, xmlNodePtr output_node)
-{
-	return -1;
-}
-
-static
-int create_regular_session(const char *name, struct lttng_domain *domain,
-	xmlNodePtr output_node)
-{
-
-
-	return -1;
-}
-
-static
 int get_net_output_uris(xmlNodePtr net_output_node, char **control_uri,
 	char **data_uri)
 {
@@ -844,6 +823,136 @@ end:
 		memset(output, 0, sizeof(struct consumer_output));
 	}
 	return ret;
+}
+
+static
+int create_session_net_output(const char *name, struct lttng_domain *domain,
+	const char *control_uri, const char *data_uri)
+{
+	int ret;
+	struct lttng_handle *handle;
+	const char *uri = NULL;
+
+	handle = lttng_create_handle(name, domain);
+	if (!handle) {
+		ret = -LTTNG_ERR_NOMEM;
+		goto end;
+	}
+
+	if (!control_uri || !data_uri) {
+		uri = control_uri ? control_uri : data_uri;
+		control_uri = uri;
+		data_uri = uri;
+	}
+
+	ret = lttng_set_consumer_url(handle, control_uri, data_uri);
+end:
+	lttng_destroy_handle(handle);
+	return ret;
+}
+
+static
+int create_snapshot_session(const char *name, xmlNodePtr output_node)
+{
+	return -1;
+}
+
+static
+int create_session(const char *name,
+	struct lttng_domain *kernel_domain,
+	struct lttng_domain *ust_domain,
+	struct lttng_domain *jul_domain,
+	xmlNodePtr output_node,
+	uint64_t live_timer_interval)
+{
+	struct consumer_output output = {0};
+	xmlNodePtr consumer_output_node;
+	int ret;
+
+	if (output_node) {
+		consumer_output_node =
+			xmlFirstElementChild(output_node);
+		if (!consumer_output_node) {
+			ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
+			goto end;
+		}
+
+		if (strcmp((const char *) consumer_output_node->name,
+			config_element_consumer_output)) {
+			WARN("Invalid output type, expected %s node",
+				config_element_consumer_output);
+			ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
+			goto end;
+		}
+
+		ret = process_consumer_output(consumer_output_node,
+			&output);
+		if (ret) {
+			goto end;
+		}
+	}
+
+	if (live_timer_interval != UINT64_MAX &&
+		!output.control_uri && !output.data_uri) {
+		ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
+		goto end;
+	}
+
+	if (output.control_uri || output.data_uri) {
+		int i;
+		struct lttng_domain *domain;
+		struct lttng_domain *domains[] =
+			{ kernel_domain, ust_domain, jul_domain };
+
+		/* network destination */
+		if (live_timer_interval && live_timer_interval != UINT64_MAX) {
+			const char *url = output.control_uri ?
+				output.control_uri : output.data_uri;
+
+			/*
+			 * An url has to be provided, even if we'll overwrite
+			 * it right after.
+			 */
+			ret = lttng_create_session_live(name, url,
+				live_timer_interval);
+		} else {
+			ret = lttng_create_session(name, NULL);
+		}
+
+		if (ret) {
+			goto end;
+		}
+
+		for (i = 0; i < sizeof(domains) / sizeof(struct lttng_domain);
+			i++) {
+			domain = domains[i];
+			if (domain) {
+				ret = create_session_net_output(name,
+					domain, output.control_uri,
+					output.data_uri);
+				if (ret) {
+					goto end;
+				}
+			}
+		}
+	} else {
+		/* either local output or no output */
+		ret = lttng_create_session(name, output.path);
+		if (ret) {
+			goto end;
+		}
+	}
+end:
+	free(output.path);
+	free(output.control_uri);
+	free(output.data_uri);
+	return ret;
+}
+
+static
+int process_domain_node(const char *session_name, xmlNodePtr domain_node)
+{
+	return 0;
 }
 
 static
@@ -972,53 +1081,27 @@ domain_init_error:
 		goto end;
 	}
 
+	if (override) {
+		/* Destroy session if it exists */
+		ret = lttng_destroy_session(name);
+		if (ret && ret != -LTTNG_ERR_SESS_NOT_FOUND) {
+			ERR("Failed to destroy existing session.");
+			goto end;
+		}
+	}
+
 	/* Create session type depending on output type */
 	if (snapshot_mode && snapshot_mode != -1) {
 		ret = create_snapshot_session(name, output_node);
 	} else if (live_timer_interval &&
 		live_timer_interval != UINT64_MAX) {
-		ret = create_live_session(name, output_node);
+		ret = create_session(name, kernel_domain,
+			ust_domain, jul_domain, output_node,
+			live_timer_interval);
 	} else {
 		/* regular session */
-		struct consumer_output output = {0};
-		xmlNodePtr consumer_output_node;
-
-		if (output_node) {
-			consumer_output_node =
-				xmlFirstElementChild(output_node);
-			if (!consumer_output_node) {
-				ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
-				goto end;
-			}
-
-			if (strcmp((const char *) consumer_output_node->name,
-				   config_element_consumer_output)) {
-				WARN("Invalid output type, expected %s node",
-				     config_element_consumer_output);
-				ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
-				goto end;
-			}
-
-			ret = process_consumer_output(consumer_output_node,
-				&output);
-			if (ret) {
-				goto end;
-			}
-		}
-
-		if (output.path) {
-			/* Local session */
-			ret = lttng_create_session(name, NULL);
-		} else if (output.control_uri || output.data_uri) {
-			/* Net destination */
-		} else {
-			/* No output mode */
-		}
-
-
-		free(output.path);
-		free(output.control_uri);
-		free(output.data_uri);
+		ret = create_session(name, kernel_domain,
+			ust_domain, jul_domain, output_node, UINT64_MAX);
 	}
 
 	if (ret) {
@@ -1027,7 +1110,17 @@ domain_init_error:
 
 	for (node = xmlFirstElementChild(domains_node); node;
 		node = xmlNextElementSibling(node)) {
-		/* Create session domains */
+		ret = process_domain_node(name, node);
+		if (ret) {
+			goto end;
+		}
+	}
+
+	if (started) {
+		ret = lttng_start_tracing(name);
+		if (ret) {
+			goto end;
+		}
 	}
 end:
 	free(kernel_domain);
