@@ -710,6 +710,43 @@ end:
 }
 
 static
+int get_overwrite_mode(xmlChar *overwrite_mode)
+{
+	int ret = -1;
+
+	if (!overwrite_mode) {
+		goto end;
+	}
+
+	if (!strcmp((char *) overwrite_mode, config_overwrite_mode_overwrite)) {
+		ret = 1;
+	} else if (!strcmp((char *) overwrite_mode,
+		config_overwrite_mode_discard)) {
+		ret = 0;
+	}
+end:
+	return ret;
+}
+
+static
+int get_output_type(xmlChar *output_type)
+{
+	int ret = -1;
+
+	if (!output_type) {
+		goto end;
+	}
+
+	if (!strcmp((char *) output_type, config_output_type_mmap)) {
+		ret = LTTNG_EVENT_MMAP;
+	} else if (!strcmp((char *) output_type, config_output_type_splice)) {
+		ret = LTTNG_EVENT_SPLICE;
+	}
+end:
+	return ret;
+}
+
+static
 int init_domain(xmlNodePtr domain_node, struct lttng_domain *domain)
 {
 	int ret;
@@ -721,6 +758,11 @@ int init_domain(xmlNodePtr domain_node, struct lttng_domain *domain)
 			xmlChar *node_content = xmlNodeGetContent(node);
 
 			/* domain type */
+			if (!node_content) {
+				ret = -LTTNG_ERR_NOMEM;
+				goto end;
+			}
+
 			ret = get_domain_type(node_content);
 			free(node_content);
 			if (ret == -1) {
@@ -734,6 +776,11 @@ int init_domain(xmlNodePtr domain_node, struct lttng_domain *domain)
 			xmlChar *node_content = xmlNodeGetContent(node);
 
 			/* buffer type */
+			if (!node_content) {
+				ret = -LTTNG_ERR_NOMEM;
+				goto end;
+			}
+
 			ret = get_buffer_type(node_content);
 			free(node_content);
 			if (ret == -1) {
@@ -761,13 +808,19 @@ int get_net_output_uris(xmlNodePtr net_output_node, char **control_uri,
 			config_element_control_uri)) {
 			/* control_uri */
 			*control_uri = (char *) xmlNodeGetContent(node);
+			if (!*control_uri) {
+				break;
+			}
 		} else {
 			/* data_uri */
 			*data_uri = (char *) xmlNodeGetContent(node);
+			if (!*data_uri) {
+				break;
+			}
 		}
 	}
 
-	return control_uri || data_uri ? 0 : -LTTNG_ERR_LOAD_INVALID_CONFIG;
+	return *control_uri || *data_uri ? 0 : -LTTNG_ERR_LOAD_INVALID_CONFIG;
 }
 
 static
@@ -784,6 +837,11 @@ int process_consumer_output(xmlNodePtr consumer_output_node,
 			xmlChar *enabled_str = xmlNodeGetContent(node);
 
 			/* enabled */
+			if (!enabled_str) {
+				ret = -LTTNG_ERR_NOMEM;
+				goto end;
+			}
+
 			ret = parse_bool(enabled_str, &output->enabled);
 			free(enabled_str);
 			if (ret) {
@@ -805,6 +863,10 @@ int process_consumer_output(xmlNodePtr consumer_output_node,
 				output->path =
 					(char *) xmlNodeGetContent(
 						output_type_node);
+				if (!output->path) {
+					ret = -LTTNG_ERR_NOMEM;
+					goto end;
+				}
 			} else {
 				/* net_output */
 				ret = get_net_output_uris(output_type_node,
@@ -888,11 +950,19 @@ int create_snapshot_session(const char *session_name, xmlNodePtr output_node)
 				config_element_name)) {
 				/* name */
 				name = (char *) xmlNodeGetContent(node);
+				if (!name) {
+					ret = -LTTNG_ERR_NOMEM;
+					goto error_snapshot_output;
+				}
 			} else if (!strcmp((const char *) node->name,
 				config_element_max_size)) {
 				xmlChar *content = xmlNodeGetContent(node);
 
 				/* max_size */
+				if (!content) {
+					ret = -LTTNG_ERR_NOMEM;
+					goto error_snapshot_output;
+				}
 				ret = parse_uint(content, &max_size);
 				free(content);
 				if (ret) {
@@ -1058,7 +1128,282 @@ end:
 static
 int process_domain_node(const char *session_name, xmlNodePtr domain_node)
 {
-	return 0;
+	int ret = 0;
+	struct lttng_domain domain = { 0 };
+	struct lttng_handle *handle;
+	xmlNodePtr channels_node;
+	xmlNodePtr node;
+
+	ret = init_domain(domain_node, &domain);
+	if (ret) {
+		goto end;
+	}
+
+	handle = lttng_create_handle(session_name, &domain);
+	if (!handle) {
+		goto end;
+	}
+
+	/* get the channels node */
+	for (node = xmlFirstElementChild(domain_node); node;
+		node = xmlNextElementSibling(node)) {
+		if (!strcmp((const char *) node->name,
+			config_element_channels)) {
+			channels_node = node;
+			break;
+		}
+	}
+
+	if (!channels_node) {
+		goto end;
+	}
+
+	/* create all channels */
+	for (node = xmlFirstElementChild(channels_node); node;
+		node = xmlNextElementSibling(node)) {
+		struct lttng_channel channel;
+		xmlNodePtr contexts_node = NULL;
+		xmlNodePtr events_node = NULL;
+
+		memset(&channel, 0, sizeof(struct lttng_channel));
+		lttng_channel_set_default_attr(&domain, &channel.attr);
+		if (!strcmp((const char *) node->name, config_element_name)) {
+			xmlChar *content;
+			size_t name_len;
+
+			/* name */
+			content = xmlNodeGetContent(node);
+			if (!content) {
+				ret = -LTTNG_ERR_NOMEM;
+				goto end;
+			}
+
+			name_len = strlen((char *) content);
+			if (name_len >= LTTNG_SYMBOL_NAME_LEN) {
+				WARN("Channel name too long.");
+				ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
+				free(content);
+				goto end;
+			}
+
+			strcpy(channel.name, (const char *) content);
+			free(content);
+		} else if (!strcmp((const char *) node->name,
+			config_element_enabled)) {
+			xmlChar *content;
+			int enabled;
+
+			/* enabled */
+			content = xmlNodeGetContent(node);
+			if (!content) {
+				ret = -LTTNG_ERR_NOMEM;
+				goto end;
+			}
+
+			ret = parse_bool(content, &enabled);
+			free(content);
+			if (ret) {
+				goto end;
+			}
+
+			channel.enabled = enabled;
+		} else if (!strcmp((const char *) node->name,
+			config_element_overwrite_mode)) {
+			xmlChar *content;
+
+			/* overwrite_mode */
+			content = xmlNodeGetContent(node);
+			if (!content) {
+				ret = -LTTNG_ERR_NOMEM;
+				goto end;
+			}
+
+			ret = get_overwrite_mode(content);
+			free(content);
+			if (ret) {
+				goto end;
+			}
+
+			channel.attr.overwrite = ret;
+		} else if (!strcmp((const char *) node->name,
+			config_element_subbuf_size)) {
+			xmlChar *content;
+
+			/* subbuffer_size */
+			content = xmlNodeGetContent(node);
+			if (!content) {
+				ret = -LTTNG_ERR_NOMEM;
+				goto end;
+			}
+
+			ret = parse_uint(content, &channel.attr.subbuf_size);
+			free(content);
+			if (ret) {
+				goto end;
+			}
+		} else if (!strcmp((const char *) node->name,
+			config_element_num_subbuf)) {
+			xmlChar *content;
+
+			/* subbuffer_count */
+			content = xmlNodeGetContent(node);
+			if (!content) {
+				ret = -LTTNG_ERR_NOMEM;
+				goto end;
+			}
+
+			ret = parse_uint(content, &channel.attr.num_subbuf);
+			free(content);
+			if (ret) {
+				goto end;
+			}
+		} else if (!strcmp((const char *) node->name,
+			config_element_switch_timer_interval)) {
+			xmlChar *content;
+			uint64_t switch_timer_interval = 0;
+
+			/* switch_timer_interval */
+			content = xmlNodeGetContent(node);
+			if (!content) {
+				ret = -LTTNG_ERR_NOMEM;
+				goto end;
+			}
+
+			ret = parse_uint(content, &switch_timer_interval);
+			free(content);
+			if (ret) {
+				goto end;
+			}
+
+			if (switch_timer_interval > UINT_MAX) {
+				WARN("switch_timer_interval out of range.");
+				ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
+				goto end;
+			}
+
+			channel.attr.switch_timer_interval =
+				switch_timer_interval;
+		} else if (!strcmp((const char *) node->name,
+			config_element_read_timer_interval)) {
+			xmlChar *content;
+			uint64_t read_timer_interval = 0;
+
+			/* read_timer_interval */
+			content = xmlNodeGetContent(node);
+			if (!content) {
+				ret = -LTTNG_ERR_NOMEM;
+				goto end;
+			}
+
+			ret = parse_uint(content, &read_timer_interval);
+			free(content);
+			if (ret) {
+				goto end;
+			}
+
+			if (read_timer_interval > UINT_MAX) {
+				WARN("read_timer_interval out of range.");
+				ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
+				goto end;
+			}
+
+			channel.attr.read_timer_interval =
+				read_timer_interval;
+		} else if (!strcmp((const char *) node->name,
+			config_element_output_type)) {
+			xmlChar *content;
+
+			/* output_type */
+			content = xmlNodeGetContent(node);
+			if (!content) {
+				ret = -LTTNG_ERR_NOMEM;
+				goto end;
+			}
+
+			ret = get_output_type(content);
+			free(content);
+			if (ret) {
+				goto end;
+			}
+
+			channel.attr.output = ret;
+		} else if (!strcmp((const char *) node->name,
+			config_element_tracefile_size)) {
+			xmlChar *content;
+
+			/* tracefile_size */
+			content = xmlNodeGetContent(node);
+			if (!content) {
+				ret = -LTTNG_ERR_NOMEM;
+				goto end;
+			}
+
+			ret = parse_uint(content, &channel.attr.tracefile_size);
+			free(content);
+			if (ret) {
+				goto end;
+			}
+		} else if (!strcmp((const char *) node->name,
+			config_element_tracefile_count)) {
+			xmlChar *content;
+
+			/* tracefile_count */
+			content = xmlNodeGetContent(node);
+			if (!content) {
+				ret = -LTTNG_ERR_NOMEM;
+				goto end;
+			}
+
+			ret = parse_uint(content, &channel.attr.tracefile_count);
+			free(content);
+			if (ret) {
+				goto end;
+			}
+		} else if (!strcmp((const char *) node->name,
+			config_element_live_timer_interval)) {
+			xmlChar *content;
+			uint64_t live_timer_interval = 0;
+
+			/* live_timer_interval */
+			content = xmlNodeGetContent(node);
+			if (!content) {
+				ret = -LTTNG_ERR_NOMEM;
+				goto end;
+			}
+
+			ret = parse_uint(content, &live_timer_interval);
+			free(content);
+			if (ret) {
+				goto end;
+			}
+
+			if (live_timer_interval > UINT_MAX) {
+				WARN("live_timer_interval out of range.");
+				ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
+				goto end;
+			}
+
+			channel.attr.live_timer_interval =
+				live_timer_interval;
+		} else if (!strcmp((const char *) node->name,
+			config_element_events)) {
+			/* events */
+			events_node = node;
+		} else {
+			/* contexts */
+			contexts_node = node;
+		}
+	}
+
+	ret = lttng_enable_channel(handle, &chan);
+	if (ret < 0) {
+		goto end;
+	}
+
+	
+end:
+	lttng_destroy_handle(handle);
+	return ret;
 }
 
 static
@@ -1084,6 +1429,11 @@ int process_session_node(xmlNodePtr session_node, const char *session_name,
 			xmlChar *node_content = xmlNodeGetContent(node);
 
 			/* name */
+			if (!node_content) {
+				ret = -LTTNG_ERR_NOMEM;
+				goto end;
+			}
+
 			name = (char *) node_content;
 		} else if (!domains_node && !strcmp((const char *) node->name,
 			config_element_domains)) {
@@ -1094,6 +1444,11 @@ int process_session_node(xmlNodePtr session_node, const char *session_name,
 			xmlChar *node_content = xmlNodeGetContent(node);
 
 			/* started */
+			if (!node_content) {
+				ret = -LTTNG_ERR_NOMEM;
+				goto end;
+			}
+
 			ret = parse_bool(node_content, &started);
 			free(node_content);
 			if (ret) {
@@ -1115,6 +1470,11 @@ int process_session_node(xmlNodePtr session_node, const char *session_name,
 					xmlNodeGetContent(attributes_child);
 
 				/* snapshot_mode */
+				if (!snapshot_mode_content) {
+					ret = -LTTNG_ERR_NOMEM;
+					goto end;
+				}
+
 				ret = parse_bool(snapshot_mode_content,
 					&snapshot_mode);
 				free(snapshot_mode_content);
@@ -1127,6 +1487,11 @@ int process_session_node(xmlNodePtr session_node, const char *session_name,
 					xmlNodeGetContent(attributes_child);
 
 				/* live_timer_interval */
+				if (!timer_interval_content) {
+					ret = -LTTNG_ERR_NOMEM;
+					goto end;
+				}
+
 				ret = parse_uint(timer_interval_content,
 					&live_timer_interval);
 				free(timer_interval_content);
