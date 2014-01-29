@@ -628,25 +628,6 @@ end:
 }
 
 static
-int parse_int(xmlChar *str, int64_t *val)
-{
-	int ret = 0;
-	char *endptr;
-
-	if (!str || !val) {
-		ret = -1;
-		goto end;
-	}
-
-	*val = strtoll((const char *) str, &endptr, 10);
-	if (!endptr || *endptr) {
-		ret = -1;
-	}
-end:
-	return ret;
-}
-
-static
 int parse_bool(xmlChar *str, int *val)
 {
 	int ret = 0;
@@ -1126,6 +1107,259 @@ end:
 }
 
 static
+int process_events_node(struct lttng_handle *handle, const char *channel_name,
+	xmlNodePtr events_node)
+{
+	return 0;
+}
+
+static
+int process_channel_attr_node(xmlNodePtr attr_node, struct lttng_channel *channel,
+	xmlNodePtr *contexts_node, xmlNodePtr *events_node)
+{
+	int ret = 0;
+
+	if (!strcmp((const char *) attr_node->name, config_element_name)) {
+		xmlChar *content;
+		size_t name_len;
+
+		/* name */
+		content = xmlNodeGetContent(attr_node);
+		if (!content) {
+			ret = -LTTNG_ERR_NOMEM;
+			goto end;
+		}
+
+		name_len = strlen((char *) content);
+		if (name_len >= LTTNG_SYMBOL_NAME_LEN) {
+			WARN("Channel name too long.");
+			ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
+			free(content);
+			goto end;
+		}
+
+		strcpy(channel->name, (const char *) content);
+		free(content);
+	} else if (!strcmp((const char *) attr_node->name,
+			   config_element_enabled)) {
+		xmlChar *content;
+		int enabled;
+
+		/* enabled */
+		content = xmlNodeGetContent(attr_node);
+		if (!content) {
+			ret = -LTTNG_ERR_NOMEM;
+			goto end;
+		}
+
+		ret = parse_bool(content, &enabled);
+		free(content);
+		if (ret) {
+			ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
+			goto end;
+		}
+
+		channel->enabled = enabled;
+	} else if (!strcmp((const char *) attr_node->name,
+			   config_element_overwrite_mode)) {
+		xmlChar *content;
+
+		/* overwrite_mode */
+		content = xmlNodeGetContent(attr_node);
+		if (!content) {
+			ret = -LTTNG_ERR_NOMEM;
+			goto end;
+		}
+
+		ret = get_overwrite_mode(content);
+		free(content);
+		if (ret) {
+			ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
+			goto end;
+		}
+
+		channel->attr.overwrite = ret;
+	} else if (!strcmp((const char *) attr_node->name,
+			   config_element_subbuf_size)) {
+		xmlChar *content;
+
+		/* subbuffer_size */
+		content = xmlNodeGetContent(attr_node);
+		if (!content) {
+			ret = -LTTNG_ERR_NOMEM;
+			goto end;
+		}
+
+		ret = parse_uint(content, &channel->attr.subbuf_size);
+		free(content);
+		if (ret) {
+			ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
+			goto end;
+		}
+	} else if (!strcmp((const char *) attr_node->name,
+			   config_element_num_subbuf)) {
+		xmlChar *content;
+
+		/* subbuffer_count */
+		content = xmlNodeGetContent(attr_node);
+		if (!content) {
+			ret = -LTTNG_ERR_NOMEM;
+			goto end;
+		}
+
+		ret = parse_uint(content, &channel->attr.num_subbuf);
+		free(content);
+		if (ret) {
+			ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
+			goto end;
+		}
+	} else if (!strcmp((const char *) attr_node->name,
+			   config_element_switch_timer_interval)) {
+		xmlChar *content;
+		uint64_t switch_timer_interval = 0;
+
+		/* switch_timer_interval */
+		content = xmlNodeGetContent(attr_node);
+		if (!content) {
+			ret = -LTTNG_ERR_NOMEM;
+			goto end;
+		}
+
+		ret = parse_uint(content, &switch_timer_interval);
+		free(content);
+		if (ret) {
+			ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
+			goto end;
+		}
+
+		if (switch_timer_interval > UINT_MAX) {
+			WARN("switch_timer_interval out of range.");
+			ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
+			goto end;
+		}
+
+		channel->attr.switch_timer_interval =
+			switch_timer_interval;
+	} else if (!strcmp((const char *) attr_node->name,
+			   config_element_read_timer_interval)) {
+		xmlChar *content;
+		uint64_t read_timer_interval = 0;
+
+		/* read_timer_interval */
+		content = xmlNodeGetContent(attr_node);
+		if (!content) {
+			ret = -LTTNG_ERR_NOMEM;
+			goto end;
+		}
+
+		ret = parse_uint(content, &read_timer_interval);
+		free(content);
+		if (ret) {
+			ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
+			goto end;
+		}
+
+		if (read_timer_interval > UINT_MAX) {
+			WARN("read_timer_interval out of range.");
+			ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
+			goto end;
+		}
+
+		channel->attr.read_timer_interval =
+			read_timer_interval;
+	} else if (!strcmp((const char *) attr_node->name,
+			   config_element_output_type)) {
+		xmlChar *content;
+
+		/* output_type */
+		content = xmlNodeGetContent(attr_node);
+		if (!content) {
+			ret = -LTTNG_ERR_NOMEM;
+			goto end;
+		}
+
+		ret = get_output_type(content);
+		free(content);
+		if (ret) {
+			ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
+			goto end;
+		}
+
+		channel->attr.output = ret;
+	} else if (!strcmp((const char *) attr_node->name,
+			   config_element_tracefile_size)) {
+		xmlChar *content;
+
+		/* tracefile_size */
+		content = xmlNodeGetContent(attr_node);
+		if (!content) {
+			ret = -LTTNG_ERR_NOMEM;
+			goto end;
+		}
+
+		ret = parse_uint(content, &channel->attr.tracefile_size);
+		free(content);
+		if (ret) {
+			ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
+			goto end;
+		}
+	} else if (!strcmp((const char *) attr_node->name,
+			   config_element_tracefile_count)) {
+		xmlChar *content;
+
+		/* tracefile_count */
+		content = xmlNodeGetContent(attr_node);
+		if (!content) {
+			ret = -LTTNG_ERR_NOMEM;
+			goto end;
+		}
+
+		ret = parse_uint(content, &channel->attr.tracefile_count);
+		free(content);
+		if (ret) {
+			ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
+			goto end;
+		}
+	} else if (!strcmp((const char *) attr_node->name,
+			   config_element_live_timer_interval)) {
+		xmlChar *content;
+		uint64_t live_timer_interval = 0;
+
+		/* live_timer_interval */
+		content = xmlNodeGetContent(attr_node);
+		if (!content) {
+			ret = -LTTNG_ERR_NOMEM;
+			goto end;
+		}
+
+		ret = parse_uint(content, &live_timer_interval);
+		free(content);
+		if (ret) {
+			ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
+			goto end;
+		}
+
+		if (live_timer_interval > UINT_MAX) {
+			WARN("live_timer_interval out of range.");
+			ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
+			goto end;
+		}
+
+		channel->attr.live_timer_interval =
+			live_timer_interval;
+	} else if (!strcmp((const char *) attr_node->name,
+			   config_element_events)) {
+		/* events */
+		*events_node = attr_node;
+	} else {
+		/* contexts */
+		*contexts_node = attr_node;
+	}
+end:
+	return ret;
+}
+
+static
 int process_domain_node(const char *session_name, xmlNodePtr domain_node)
 {
 	int ret = 0;
@@ -1164,243 +1398,37 @@ int process_domain_node(const char *session_name, xmlNodePtr domain_node)
 		struct lttng_channel channel;
 		xmlNodePtr contexts_node = NULL;
 		xmlNodePtr events_node = NULL;
+		xmlNodePtr channel_attr_node;
 
 		memset(&channel, 0, sizeof(struct lttng_channel));
 		lttng_channel_set_default_attr(&domain, &channel.attr);
-		if (!strcmp((const char *) node->name, config_element_name)) {
-			xmlChar *content;
-			size_t name_len;
 
-			/* name */
-			content = xmlNodeGetContent(node);
-			if (!content) {
-				ret = -LTTNG_ERR_NOMEM;
-				goto end;
-			}
-
-			name_len = strlen((char *) content);
-			if (name_len >= LTTNG_SYMBOL_NAME_LEN) {
-				WARN("Channel name too long.");
-				ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
-				free(content);
-				goto end;
-			}
-
-			strcpy(channel.name, (const char *) content);
-			free(content);
-		} else if (!strcmp((const char *) node->name,
-			config_element_enabled)) {
-			xmlChar *content;
-			int enabled;
-
-			/* enabled */
-			content = xmlNodeGetContent(node);
-			if (!content) {
-				ret = -LTTNG_ERR_NOMEM;
-				goto end;
-			}
-
-			ret = parse_bool(content, &enabled);
-			free(content);
+		for (channel_attr_node = xmlFirstElementChild(node); channel_attr_node;
+			channel_attr_node = xmlNextElementSibling(channel_attr_node)) {
+			ret = process_channel_attr_node(channel_attr_node, &channel,
+				&contexts_node, &events_node);
 			if (ret) {
 				goto end;
 			}
-
-			channel.enabled = enabled;
-		} else if (!strcmp((const char *) node->name,
-			config_element_overwrite_mode)) {
-			xmlChar *content;
-
-			/* overwrite_mode */
-			content = xmlNodeGetContent(node);
-			if (!content) {
-				ret = -LTTNG_ERR_NOMEM;
-				goto end;
-			}
-
-			ret = get_overwrite_mode(content);
-			free(content);
-			if (ret) {
-				goto end;
-			}
-
-			channel.attr.overwrite = ret;
-		} else if (!strcmp((const char *) node->name,
-			config_element_subbuf_size)) {
-			xmlChar *content;
-
-			/* subbuffer_size */
-			content = xmlNodeGetContent(node);
-			if (!content) {
-				ret = -LTTNG_ERR_NOMEM;
-				goto end;
-			}
-
-			ret = parse_uint(content, &channel.attr.subbuf_size);
-			free(content);
-			if (ret) {
-				goto end;
-			}
-		} else if (!strcmp((const char *) node->name,
-			config_element_num_subbuf)) {
-			xmlChar *content;
-
-			/* subbuffer_count */
-			content = xmlNodeGetContent(node);
-			if (!content) {
-				ret = -LTTNG_ERR_NOMEM;
-				goto end;
-			}
-
-			ret = parse_uint(content, &channel.attr.num_subbuf);
-			free(content);
-			if (ret) {
-				goto end;
-			}
-		} else if (!strcmp((const char *) node->name,
-			config_element_switch_timer_interval)) {
-			xmlChar *content;
-			uint64_t switch_timer_interval = 0;
-
-			/* switch_timer_interval */
-			content = xmlNodeGetContent(node);
-			if (!content) {
-				ret = -LTTNG_ERR_NOMEM;
-				goto end;
-			}
-
-			ret = parse_uint(content, &switch_timer_interval);
-			free(content);
-			if (ret) {
-				goto end;
-			}
-
-			if (switch_timer_interval > UINT_MAX) {
-				WARN("switch_timer_interval out of range.");
-				ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
-				goto end;
-			}
-
-			channel.attr.switch_timer_interval =
-				switch_timer_interval;
-		} else if (!strcmp((const char *) node->name,
-			config_element_read_timer_interval)) {
-			xmlChar *content;
-			uint64_t read_timer_interval = 0;
-
-			/* read_timer_interval */
-			content = xmlNodeGetContent(node);
-			if (!content) {
-				ret = -LTTNG_ERR_NOMEM;
-				goto end;
-			}
-
-			ret = parse_uint(content, &read_timer_interval);
-			free(content);
-			if (ret) {
-				goto end;
-			}
-
-			if (read_timer_interval > UINT_MAX) {
-				WARN("read_timer_interval out of range.");
-				ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
-				goto end;
-			}
-
-			channel.attr.read_timer_interval =
-				read_timer_interval;
-		} else if (!strcmp((const char *) node->name,
-			config_element_output_type)) {
-			xmlChar *content;
-
-			/* output_type */
-			content = xmlNodeGetContent(node);
-			if (!content) {
-				ret = -LTTNG_ERR_NOMEM;
-				goto end;
-			}
-
-			ret = get_output_type(content);
-			free(content);
-			if (ret) {
-				goto end;
-			}
-
-			channel.attr.output = ret;
-		} else if (!strcmp((const char *) node->name,
-			config_element_tracefile_size)) {
-			xmlChar *content;
-
-			/* tracefile_size */
-			content = xmlNodeGetContent(node);
-			if (!content) {
-				ret = -LTTNG_ERR_NOMEM;
-				goto end;
-			}
-
-			ret = parse_uint(content, &channel.attr.tracefile_size);
-			free(content);
-			if (ret) {
-				goto end;
-			}
-		} else if (!strcmp((const char *) node->name,
-			config_element_tracefile_count)) {
-			xmlChar *content;
-
-			/* tracefile_count */
-			content = xmlNodeGetContent(node);
-			if (!content) {
-				ret = -LTTNG_ERR_NOMEM;
-				goto end;
-			}
-
-			ret = parse_uint(content, &channel.attr.tracefile_count);
-			free(content);
-			if (ret) {
-				goto end;
-			}
-		} else if (!strcmp((const char *) node->name,
-			config_element_live_timer_interval)) {
-			xmlChar *content;
-			uint64_t live_timer_interval = 0;
-
-			/* live_timer_interval */
-			content = xmlNodeGetContent(node);
-			if (!content) {
-				ret = -LTTNG_ERR_NOMEM;
-				goto end;
-			}
-
-			ret = parse_uint(content, &live_timer_interval);
-			free(content);
-			if (ret) {
-				goto end;
-			}
-
-			if (live_timer_interval > UINT_MAX) {
-				WARN("live_timer_interval out of range.");
-				ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
-				goto end;
-			}
-
-			channel.attr.live_timer_interval =
-				live_timer_interval;
-		} else if (!strcmp((const char *) node->name,
-			config_element_events)) {
-			/* events */
-			events_node = node;
-		} else {
-			/* contexts */
-			contexts_node = node;
 		}
-	}
 
-	ret = lttng_enable_channel(handle, &chan);
-	if (ret < 0) {
-		goto end;
-	}
+		ret = lttng_enable_channel(handle, &channel);
+		if (ret < 0) {
+			goto end;
+		}
 
-	
+		ret = process_events_node(handle, channel.name, events_node);
+		if (ret) {
+			goto end;
+		}
+
+/*
+		ret = process_contexts_node();
+		if (ret) {
+			goto end;
+		}
+*/
+	}
 end:
 	lttng_destroy_handle(handle);
 	return ret;
