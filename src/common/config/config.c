@@ -798,6 +798,55 @@ end:
 }
 
 static
+int get_context_type(xmlChar *context_type)
+{
+	int ret = -1;
+
+	if (!context_type) {
+		goto end;
+	}
+
+	if (!strcmp((char *) context_type, config_event_context_pid)) {
+		ret = LTTNG_EVENT_CONTEXT_PID;
+	} else if (!strcmp((char *) context_type,
+		config_event_context_procname)) {
+		ret = LTTNG_EVENT_CONTEXT_PROCNAME;
+	} else if (!strcmp((char *) context_type,
+		config_event_context_prio)) {
+		ret = LTTNG_EVENT_CONTEXT_PRIO;
+	} else if (!strcmp((char *) context_type,
+		config_event_context_nice)) {
+		ret = LTTNG_EVENT_CONTEXT_NICE;
+	} else if (!strcmp((char *) context_type,
+		config_event_context_vpid)) {
+		ret = LTTNG_EVENT_CONTEXT_VPID;
+	} else if (!strcmp((char *) context_type,
+		config_event_context_tid)) {
+		ret = LTTNG_EVENT_CONTEXT_TID;
+	} else if (!strcmp((char *) context_type,
+		config_event_context_vtid)) {
+		ret = LTTNG_EVENT_CONTEXT_VTID;
+	} else if (!strcmp((char *) context_type,
+		config_event_context_ppid)) {
+		ret = LTTNG_EVENT_CONTEXT_PPID;
+	} else if (!strcmp((char *) context_type,
+		config_event_context_vppid)) {
+		ret = LTTNG_EVENT_CONTEXT_VPPID;
+	} else if (!strcmp((char *) context_type,
+		config_event_context_pthread_id)) {
+		ret = LTTNG_EVENT_CONTEXT_PTHREAD_ID;
+	} else if (!strcmp((char *) context_type,
+		config_event_context_hostname)) {
+		ret = LTTNG_EVENT_CONTEXT_HOSTNAME;
+	} else if (!strcmp((char *) context_type,
+		config_event_context_ip)) {
+		ret = LTTNG_EVENT_CONTEXT_IP;
+	}
+end:
+	return ret;
+}
+
+static
 int init_domain(xmlNodePtr domain_node, struct lttng_domain *domain)
 {
 	int ret;
