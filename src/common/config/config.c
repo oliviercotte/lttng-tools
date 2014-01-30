@@ -1796,7 +1796,146 @@ end:
 }
 
 static
-int process_domain_node(const char *session_name, xmlNodePtr domain_node)
+int process_context_node(xmlNodePtr context_node,
+	struct lttng_handle *handle, const char *channel_name)
+{
+	int ret = 0;
+	struct lttng_event_context context;
+	xmlNodePtr context_child_node = xmlFirstElementChild(context_node);
+
+	memset(&context, 0, sizeof(struct lttng_event_context));
+	if (!context_child_node) {
+		ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
+		goto end;
+	}
+
+	if (!strcmp((const char *) context_child_node->name,
+		config_element_type)) {
+		xmlChar *content = xmlNodeGetContent(context_child_node);
+
+		/* type */
+		if (!content) {
+			ret = -LTTNG_ERR_NOMEM;
+			goto end;
+		}
+
+		ret = get_context_type(content);
+		free(content);
+		if (ret < 0) {
+			ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
+			goto end;
+		}
+
+		context.ctx = ret;
+		ret = 0;
+	} else {
+		xmlNodePtr perf_attr_node;
+
+		/* perf */
+		context.ctx = LTTNG_EVENT_CONTEXT_PERF_COUNTER;
+		for (perf_attr_node = xmlFirstElementChild(context_child_node);
+			perf_attr_node; perf_attr_node =
+				xmlNextElementSibling(perf_attr_node)) {
+			if (!strcmp((const char *) perf_attr_node->name,
+				config_element_type)) {
+				xmlChar *content;
+				uint64_t type = 0;
+
+				/* type */
+				content = xmlNodeGetContent(perf_attr_node);
+				if (!content) {
+					ret = -LTTNG_ERR_NOMEM;
+					goto end;
+				}
+
+				ret = parse_uint(content, &type);
+				free(content);
+				if (ret) {
+					ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
+					goto end;
+				}
+
+				if (type > UINT32_MAX) {
+					WARN("perf context type out of range.");
+					ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
+					goto end;
+				}
+
+				context.u.perf_counter.type = type;
+			} else if (!strcmp((const char *) perf_attr_node->name,
+				config_element_config)) {
+				xmlChar *content;
+				uint64_t config = 0;
+
+				/* config */
+				content = xmlNodeGetContent(perf_attr_node);
+				if (!content) {
+					ret = -LTTNG_ERR_NOMEM;
+					goto end;
+				}
+
+				ret = parse_uint(content, &config);
+				free(content);
+				if (ret) {
+					ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
+					goto end;
+				}
+
+				context.u.perf_counter.config = config;
+			} else if (!strcmp((const char *) perf_attr_node->name,
+				config_element_name)) {
+				xmlChar *content;
+				size_t name_len;
+
+				/* name */
+				content = xmlNodeGetContent(perf_attr_node);
+				if (!content) {
+					ret = -LTTNG_ERR_NOMEM;
+					goto end;
+				}
+
+				name_len = strlen((char *) content);
+				if (name_len >= LTTNG_SYMBOL_NAME_LEN) {
+					WARN("perf context name too long.");
+					ret = -LTTNG_ERR_LOAD_INVALID_CONFIG;
+					free(content);
+					goto end;
+				}
+
+				strcpy(context.u.perf_counter.name,
+					(const char *) content);
+				free(content);
+			}
+		}
+	}
+
+	ret = lttng_add_context(handle, &context, NULL, channel_name);
+end:
+	return ret;
+}
+
+static
+int process_contexts_node(xmlNodePtr contexts_node,
+	struct lttng_handle *handle, const char *channel_name)
+{
+	int ret = 0;
+	xmlNodePtr context_node;
+
+	for (context_node = xmlFirstElementChild(contexts_node);
+		context_node; context_node =
+		xmlNextElementSibling(context_node)) {
+		ret = process_context_node(context_node, handle,
+			channel_name);
+		if (ret) {
+			goto end;
+		}
+	}
+end:
+	return ret;
+}
+
+static
+int process_domain_node(xmlNodePtr domain_node, const char *session_name)
 {
 	int ret = 0;
 	struct lttng_domain domain = { 0 };
@@ -1859,12 +1998,11 @@ int process_domain_node(const char *session_name, xmlNodePtr domain_node)
 			goto end;
 		}
 
-/*
-		ret = process_contexts_node();
+		ret = process_contexts_node(contexts_node, handle,
+			channel.name);
 		if (ret) {
 			goto end;
 		}
-*/
 	}
 end:
 	lttng_destroy_handle(handle);
@@ -2046,7 +2184,7 @@ domain_init_error:
 
 	for (node = xmlFirstElementChild(domains_node); node;
 		node = xmlNextElementSibling(node)) {
-		ret = process_domain_node(name, node);
+		ret = process_domain_node(node, name);
 		if (ret) {
 			goto end;
 		}
