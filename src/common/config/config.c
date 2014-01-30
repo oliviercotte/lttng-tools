@@ -1249,13 +1249,12 @@ end:
 }
 
 static
-int process_events_node(xmlNodePtr events_node, struct lttng_handle *handle,
+int process_event_node(xmlNodePtr event_node, struct lttng_handle *handle,
 	const char *channel_name)
 {
 	int ret = 0;
 	xmlNodePtr node;
-
-	for (node = xmlFirstElementChild(events_node); node;
+	for (node = xmlFirstElementChild(event_node); node;
 		node = xmlNextElementSibling(node)) {
 		struct lttng_event event;
 		char **exclusions = NULL;
@@ -1400,7 +1399,7 @@ int process_events_node(xmlNodePtr events_node, struct lttng_handle *handle,
 
 			for (exclusion_node = xmlFirstElementChild(node);
 				exclusion_node; exclusion_node =
-				xmlNextElementSibling(exclusion_node)) {
+					xmlNextElementSibling(exclusion_node)) {
 				xmlChar *content =
 					xmlNodeGetContent(exclusion_node);
 
@@ -1431,7 +1430,7 @@ int process_events_node(xmlNodePtr events_node, struct lttng_handle *handle,
 			}
 
 			if (!strcmp((const char *) node->name,
-				config_element_probe_attributes)) {
+				    config_element_probe_attributes)) {
 				xmlNodePtr probe_attribute_node;
 
 				/* probe_attributes */
@@ -1440,7 +1439,7 @@ int process_events_node(xmlNodePtr events_node, struct lttng_handle *handle,
 					probe_attribute_node;
 					probe_attribute_node =
 						xmlNextElementSibling(
-						probe_attribute_node)) {
+							probe_attribute_node)) {
 					ret = process_probe_attribute_node(
 						probe_attribute_node,
 						&event.attr.probe);
@@ -1469,14 +1468,31 @@ int process_events_node(xmlNodePtr events_node, struct lttng_handle *handle,
 
 		ret = lttng_enable_event_with_exclusions(handle, &event,
 			channel_name, filter_expression, exclusion_count,
-			exclusions);
-error_event:
+			 exclusions);
+	error_event:
 		for (i = 0; i < exclusion_count; i++) {
 			free(exclusions[i]);
 		}
 
 		free(exclusions);
 		free(filter_expression);
+		if (ret) {
+			goto end;
+		}
+	end:
+		return ret;
+}
+
+static
+int process_events_node(xmlNodePtr events_node, struct lttng_handle *handle,
+	const char *channel_name)
+{
+	int ret = 0;
+	xmlNodePtr node;
+
+	for (node = xmlFirstElementChild(events_node); node;
+		node = xmlNextElementSibling(node)) {
+		ret = process_event_node(event_node, handle, channel_name);
 		if (ret) {
 			goto end;
 		}
