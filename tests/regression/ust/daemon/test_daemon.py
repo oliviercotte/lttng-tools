@@ -21,6 +21,8 @@ import subprocess
 import re
 import shutil
 import sys
+import tempfile
+import struct
 
 test_path = os.path.dirname(os.path.abspath(__file__)) + "/"
 test_utils_path = test_path
@@ -39,36 +41,54 @@ print("1..{0}".format(NR_TESTS))
 if session_daemon_alive() == 0:
     bail("No sessiond running. Please make sure you are running this test with the \"run\" shell script and verify that the lttng tools are properly installed.")
 
+tmp_directory = tempfile.mkdtemp()
+daemon_pid_pipe_path = tmp_directory + "/daemon.pipe"
+
 session_info = create_session()
 enable_ust_tracepoint_event(session_info, "*")
 start_session(session_info)
 
-daemon_process = subprocess.Popen(test_path + "daemon", stdout=subprocess.PIPE)
+print("Starting daemon process...")
+daemon_process = subprocess.Popen([test_path + "daemon", daemon_pid_pipe_path])
+
 if sys.version_info >= (3, 3):
     try:
-        daemon_process_return_code = daemon_process.wait(5)
+        daemon_process.wait(5)
     except TimeoutExpired:
         daemon_process.kill()
-        daemon_process_return_code = -1
+        bail("Failed to run daemon test application (time out)", session_info)
 else:
-    daemon_process_return_code = daemon_process.wait()
+    daemon_process.wait()
 
-daemon_process_output = daemon_process.communicate()[0]
-daemon_process_output = daemon_process_output.decode('utf-8').splitlines()
+print("Came back from daemon process...")
+parent_pid = -1
+child_pid = -1
 
-print_test_result(daemon_process_return_code == 0, current_test, "Successful call to daemon() and normal exit")
+print_test_result(daemon_process.returncode == 0, current_test, "Successful call to daemon() and normal exit")
 current_test += 1
 
-if daemon_process_return_code != 0:
+if daemon_process.returncode != 0:
     bail("Could not trigger tracepoints successfully. Abondoning test.")
 
 stop_session(session_info)
 
-if len(daemon_process_output) != 2:
-    bail("Unexpected output received from daemon test executable." + str(daemon_process_output))
+print("Open pipe...")
+try:
+    pid_pipe = open(daemon_pid_pipe_path, 'r')
+except (IOError, OSError):
+    bail("Unable to open pid pipe.")
 
-parent_pid = re.search(r"\d+", daemon_process_output[0]).group(0)
-daemon_pid = re.search(r"\d+", daemon_process_output[1]).group(0)
+print("Read of size 1...")
+pid_type_size = struct.unpack("=B", pid_pipe.read(1))
+print("pid_t size is : {}", pid_type_size)
+
+parent_pid = struct.unpack("=i", pid_pipe.read(pid_type_size))
+print("parent_pid = {}", parent_pid)
+child_pid = struct.unpack("=i", pid_pipe.read(pid_type_size))
+print("child_pid = {}", child_pid)
+
+if parent_pid == -1 or child_pid == -1:
+    bail("Unexpected output received from daemon test executable." + str(daemon_process_output))
 
 try:
     babeltrace_process = subprocess.Popen(["babeltrace", session_info.trace_path], stdout=subprocess.PIPE)
